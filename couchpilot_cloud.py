@@ -118,14 +118,14 @@ if menu == "Suche & Inspiration":
                     st.write(movie.get('overview'))
                     st.markdown("---")
                     found = local_lib.get(movie.get('title', '').lower())
-                    if not found: # Unscharfe Suche
+                    if not found:
                         for k, v in local_lib.items():
                             if (len(k)>4) and (movie.get('title','').lower() in k): found = v; break
                     
                     if found: st.success(f"💾 **LOKAL: {found['path']}**")
                     else: st.markdown(f"[🌐 Google Stream Suche](https://www.google.com/search?q={movie.get('title')}+stream+deutsch)")
 
-# --- TAB 2: TV & MEDIATHEK (NEUES DESIGN) ---
+# --- TAB 2: TV & MEDIATHEK (KOMPAKT) ---
 elif menu == "TV- und Mediatheken":
     st.header("📺 Live TV & Tipps")
     
@@ -141,9 +141,8 @@ elif menu == "TV- und Mediatheken":
         
         if 'tv_data' in st.session_state and st.session_state['tv_data']:
             for item in st.session_state['tv_data']:
-                # NEUES KARTEN-LAYOUT
+                # Container mit weniger Innenabstand
                 with st.container(border=True):
-                    # Titel zerlegen: "20:15 | ProSieben | Harry Potter"
                     parts = item['title'].split('|')
                     
                     if len(parts) >= 3:
@@ -151,22 +150,21 @@ elif menu == "TV- und Mediatheken":
                         sender_str = parts[1].strip()
                         title_str = " | ".join(parts[2:]).strip()
                         
-                        # Spalten: Links Zeit/Sender (schmal), Rechts Inhalt (breit)
-                        col_time, col_content = st.columns([1, 5])
+                        col_time, col_content = st.columns([1, 6])
                         
                         with col_time:
-                            # Zeit groß und fett in Orange
-                            st.markdown(f"<h2 style='text-align: center; color: #e67e22; margin:0; padding:0;'>{time_str}</h2>", unsafe_allow_html=True)
-                            # Sender darunter zentriert
-                            st.markdown(f"<div style='text-align: center; font-weight: bold; color: #888;'>{sender_str}</div>", unsafe_allow_html=True)
+                            # Zeit kompakter, aber immer noch orange/fett
+                            st.markdown(f"<div style='text-align: center; color: #e67e22; font-weight: bold; font-size: 1.1em;'>{time_str}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='text-align: center; font-size: 0.8em; color: gray;'>{sender_str}</div>", unsafe_allow_html=True)
                             
                         with col_content:
-                            st.subheader(title_str)
-                            st.write(item['desc'])
+                            # TITEL: Fett aber normale Größe (statt subheader)
+                            st.markdown(f"**{title_str}**")
+                            # Beschreibung: Kleinere Schrift
+                            st.caption(item['desc'])
                     else:
-                        # Fallback falls Format anders ist
-                        st.subheader(item['title'])
-                        st.write(item['desc'])
+                        st.markdown(f"**{item['title']}**")
+                        st.caption(item['desc'])
         else:
             st.info("Klicke oben auf 'TV Aktualisieren'.")
 
@@ -175,10 +173,11 @@ elif menu == "TV- und Mediatheken":
             with st.spinner("Lade Mediatheken..."):
                 items = get_feed_items("https://www.filmdienst.de/rss/mediatheken", "Mediathek")
                 for item in items:
-                    # Auch hier Container für Karten-Look
                     with st.container(border=True):
-                        st.subheader(item['title'])
-                        st.caption(item['desc'])
+                        # Titel fett, normale Größe
+                        st.markdown(f"**{item['title']}**")
+                        # unsafe_allow_html sorgt dafür, dass <br> und &uuml; richtig angezeigt werden
+                        st.markdown(f"<div style='font-size: 0.9em; color: #444;'>{item['desc']}</div>", unsafe_allow_html=True)
 
 # --- TAB 3: LISTE ---
 elif menu == "Lokale Liste":

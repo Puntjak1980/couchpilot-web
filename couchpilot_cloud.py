@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 import random
+import html
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="CouchPilot Cloud", page_icon="🎬", layout="wide")
@@ -54,6 +55,15 @@ def fetch_tmdb(url):
     except: pass
     return {}
 
+def clean_html(raw_text):
+    """Entfernt HTML-Tags und repariert Umlaute."""
+    if not raw_text: return ""
+    # Umlaute reparieren (&uuml; -> ü)
+    text = html.unescape(raw_text)
+    # Einfache HTML Tags entfernen (für saubere Textanzeige)
+    text = text.replace("<br>", "\n").replace("<p>", "").replace("</p>", "")
+    return text
+
 def get_feed_items(url, tag_prefix):
     items = []
     try:
@@ -61,7 +71,8 @@ def get_feed_items(url, tag_prefix):
         tree = ET.fromstring(resp.content)
         for item in tree.findall('./channel/item'):
             title = item.find('title').text
-            desc = item.find('description').text or ""
+            raw_desc = item.find('description').text or ""
+            desc = clean_html(raw_desc)
             items.append({"title": title, "desc": desc, "tag": tag_prefix})
     except: pass
     return items
@@ -110,6 +121,7 @@ if menu == "Suche & Inspiration":
 
     if results:
         for movie in results:
+            # Hier nutzen wir st.expander - das Vorbild für die TV-Seite
             with st.expander(f"{movie.get('title')} ({str(movie.get('release_date'))[:4]}) - ⭐ {movie.get('vote_average')}"):
                 c1, c2 = st.columns([1, 3])
                 with c1:
@@ -125,7 +137,7 @@ if menu == "Suche & Inspiration":
                     if found: st.success(f"💾 **LOKAL: {found['path']}**")
                     else: st.markdown(f"[🌐 Google Stream Suche](https://www.google.com/search?q={movie.get('title')}+stream+deutsch)")
 
-# --- TAB 2: TV & MEDIATHEK (KOMPAKT) ---
+# --- TAB 2: TV & MEDIATHEK (JETZT AUCH MIT EXPANDERN) ---
 elif menu == "TV- und Mediatheken":
     st.header("📺 Live TV & Tipps")
     
@@ -141,30 +153,13 @@ elif menu == "TV- und Mediatheken":
         
         if 'tv_data' in st.session_state and st.session_state['tv_data']:
             for item in st.session_state['tv_data']:
-                # Container mit weniger Innenabstand
-                with st.container(border=True):
-                    parts = item['title'].split('|')
-                    
-                    if len(parts) >= 3:
-                        time_str = parts[0].strip()
-                        sender_str = parts[1].strip()
-                        title_str = " | ".join(parts[2:]).strip()
-                        
-                        col_time, col_content = st.columns([1, 6])
-                        
-                        with col_time:
-                            # Zeit kompakter, aber immer noch orange/fett
-                            st.markdown(f"<div style='text-align: center; color: #e67e22; font-weight: bold; font-size: 1.1em;'>{time_str}</div>", unsafe_allow_html=True)
-                            st.markdown(f"<div style='text-align: center; font-size: 0.8em; color: gray;'>{sender_str}</div>", unsafe_allow_html=True)
-                            
-                        with col_content:
-                            # TITEL: Fett aber normale Größe (statt subheader)
-                            st.markdown(f"**{title_str}**")
-                            # Beschreibung: Kleinere Schrift
-                            st.caption(item['desc'])
-                    else:
-                        st.markdown(f"**{item['title']}**")
-                        st.caption(item['desc'])
+                # Label bauen: "20:15 | Sender | Titel"
+                # Wir nutzen ein Emoji für bessere Sichtbarkeit
+                label = f"⏰ {item['title']}"
+                
+                # Das gleiche Expander-Design wie bei den Filmen
+                with st.expander(label):
+                    st.markdown(item['desc']) # Beschreibung erst beim Aufklappen
         else:
             st.info("Klicke oben auf 'TV Aktualisieren'.")
 
@@ -173,11 +168,9 @@ elif menu == "TV- und Mediatheken":
             with st.spinner("Lade Mediatheken..."):
                 items = get_feed_items("https://www.filmdienst.de/rss/mediatheken", "Mediathek")
                 for item in items:
-                    with st.container(border=True):
-                        # Titel fett, normale Größe
-                        st.markdown(f"**{item['title']}**")
-                        # unsafe_allow_html sorgt dafür, dass <br> und &uuml; richtig angezeigt werden
-                        st.markdown(f"<div style='font-size: 0.9em; color: #444;'>{item['desc']}</div>", unsafe_allow_html=True)
+                    # Auch hier: Kompakter Balken, Klick öffnet Text
+                    with st.expander(f"▶ {item['title']}"):
+                        st.markdown(item['desc'])
 
 # --- TAB 3: LISTE ---
 elif menu == "Lokale Liste":

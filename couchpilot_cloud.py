@@ -6,7 +6,7 @@ import random
 import html
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title="CouchPilot Cloud", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="wide")
 
 # --- API KEY SICHER LADEN ---
 try:

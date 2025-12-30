@@ -6,7 +6,7 @@ import random
 import html
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="centered", initial_sidebar_state="collapsed")
 
 # --- API KEY SICHER LADEN ---
 try:

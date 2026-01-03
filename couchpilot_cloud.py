@@ -10,7 +10,7 @@ from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 
 # --- 1. KONFIGURATION ---
-st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="CouchPilot v6", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
 
 # --- 2. TÜRSTEHER (LOGIN SCHUTZ) ---
 def check_password():

@@ -15,8 +15,9 @@ st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="wide", ini
 # --- 2. TÜRSTEHER (LOGIN SCHUTZ) ---
 def check_password():
     """Prüft das Passwort, bevor die App lädt."""
+    # Wenn APP_PASSWORD nicht in den Secrets steht, warnen wir, aber lassen die App laufen (für Tests)
     if "APP_PASSWORD" not in st.secrets:
-        st.warning("⚠️ Kein Passwort konfiguriert (APP_PASSWORD fehlt in Secrets). App ist offen.")
+        st.warning("⚠️ ACHTUNG: 'APP_PASSWORD' fehlt in den Secrets! Die App ist ungeschützt.")
         return True
 
     def password_entered():
@@ -39,10 +40,11 @@ def check_password():
         # Passwort korrekt
         return True
 
+# HIER WIRD GESTOPPT, WENN PASSWORT FALSCH
 if not check_password():
-    st.stop() # HIER STOPPT DIE APP, WENN NICHT EINGELOGGT
+    st.stop() 
 
-# --- AB HIER STARTET DIE EIGENTLICHE APP ---
+# --- 3. HAUPTPROGRAMM (STARTET NUR WENN EINGELOGGT) ---
 
 # --- SESSION STATE ---
 if 'tv_infos' not in st.session_state: st.session_state['tv_infos'] = {}
@@ -150,16 +152,18 @@ def load_data_from_github():
         except: pass
     return library
 
-# --- DATENBANK FUNKTIONEN ---
+# --- DATENBANK FUNKTIONEN (MIT QUELLE) ---
 
 def get_db_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
-        # Lese 9 Spalten (inkl. source)
+        # Wir lesen jetzt 9 Spalten (inkl. source)
         df = conn.read(spreadsheet=SHEET_URL, usecols=list(range(9)), ttl=0)
+        # Standard-Spalten definieren
         cols = ["id", "title", "poster_path", "release_date", "vote_average", "overview", "status", "added_date", "source"]
         if df.empty: return pd.DataFrame(columns=cols)
         df['id'] = df['id'].astype(str)
+        # Fehlende Spalten auffüllen (für Kompatibilität mit alter Tabelle)
         for c in cols:
             if c not in df.columns: df[c] = ""
         return df
@@ -192,7 +196,7 @@ def update_db_status(movie, new_status, origin="Unbekannt"):
                 "overview": clean_html(movie.get('overview', '')),
                 "status": new_status,
                 "added_date": today_str,
-                "source": origin
+                "source": origin # NEU: QUELLE SPEICHERN
             }])
             df = pd.concat([df, new_row], ignore_index=True)
             st.toast(f"Neu: '{title}' ({origin})")
@@ -304,6 +308,7 @@ if menu == "Suche & Inspiration":
                  for k,v in local_lib.items():
                     if len(k)>4 and title.lower() in k: found_local=v; break
             
+            # QUELLE BESTIMMEN
             source_label = "💾 Lokal" if found_local else "🔍 Suche"
 
             with st.expander(f"{title} ({year}) ⭐ {rating} {g_text}"):
@@ -322,7 +327,7 @@ if menu == "Suche & Inspiration":
                     
                     b1, b2 = st.columns(2)
                     if b1.button("🎫 Merken", key=f"s_wl_{m_id}", disabled=in_wl):
-                        update_db_status(m, 'watchlist', origin=source_label)
+                        update_db_status(m, 'watchlist', origin=source_label) # QUELLE ÜBERGEBEN
                         st.rerun()
                     if b2.button("✅ Gesehen", key=f"s_sn_{m_id}", disabled=in_seen):
                         update_db_status(m, 'seen', origin=source_label)
@@ -479,6 +484,7 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
         date_added = m.get('added_date', '')
         source = m.get('source', '')
         
+        # INFO STRING ZUSAMMENBAUEN
         meta_info = ""
         if date_added: meta_info += f" | 📅 {date_added}"
         if source: meta_info += f" | Quelle: {source}"

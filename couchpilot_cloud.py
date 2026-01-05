@@ -8,14 +8,15 @@ import io
 import re
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
+# NEU: Für intelligenten Textvergleich (Navy CIS vs NCIS)
+from rapidfuzz import process, fuzz
 
 # --- 1. KONFIGURATION ---
-st.set_page_config(page_title="CouchPilot v6", page_icon="🍿", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
 
 # --- 2. TÜRSTEHER (LOGIN SCHUTZ) ---
 def check_password():
     """Prüft das Passwort, bevor die App lädt."""
-    # Wenn APP_PASSWORD nicht in den Secrets steht, warnen wir, aber lassen die App laufen (für Tests)
     if "APP_PASSWORD" not in st.secrets:
         st.warning("⚠️ ACHTUNG: 'APP_PASSWORD' fehlt in den Secrets! Die App ist ungeschützt.")
         return True
@@ -23,28 +24,24 @@ def check_password():
     def password_entered():
         if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Passwort aus Speicher entfernen
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # Erstaufruf: Eingabefeld zeigen
         st.text_input("🔒 CouchPilot Zugang:", type="password", on_change=password_entered, key="password")
         return False
     elif not st.session_state["password_correct"]:
-        # Falsches Passwort
         st.text_input("🔒 CouchPilot Zugang:", type="password", on_change=password_entered, key="password")
         st.error("😕 Zugriff verweigert.")
         return False
     else:
-        # Passwort korrekt
         return True
 
-# HIER WIRD GESTOPPT, WENN PASSWORT FALSCH
 if not check_password():
     st.stop() 
 
-# --- 3. HAUPTPROGRAMM (STARTET NUR WENN EINGELOGGT) ---
+# --- 3. HAUPTPROGRAMM ---
 
 # --- SESSION STATE ---
 if 'tv_infos' not in st.session_state: st.session_state['tv_infos'] = {}
@@ -113,6 +110,36 @@ def get_feed_items(url, tag_prefix):
     except: pass
     return items
 
+# --- NEUE FUNKTION: INTELLIGENTE SUCHE (FUZZY) ---
+def find_local_fuzzy(tmdb_title, library):
+    """Sucht intelligent nach einem Titel in der lokalen Bibliothek."""
+    if not tmdb_title: return None
+    
+    # 1. Exakter Treffer (schnell)
+    if tmdb_title.lower() in library:
+        return library[tmdb_title.lower()]
+    
+    # 2. Bereinigter Vergleich (entfernt Sonderzeichen für "NCIS: Sydney" == "NCIS Sydney")
+    def clean(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
+    
+    tmdb_clean = clean(tmdb_title)
+    clean_keys_map = {clean(k): v for k, v in library.items()}
+    
+    if tmdb_clean in clean_keys_map:
+        return clean_keys_map[tmdb_clean]
+
+    # 3. Fuzzy Match (Unscharf für "Navy CIS" vs "NCIS")
+    choices = list(library.keys())
+    # score_cutoff=85 bedeutet: Hohe Ähnlichkeit erforderlich
+    match = process.extractOne(tmdb_title.lower(), choices, scorer=fuzz.WRatio, score_cutoff=85)
+    
+    if match:
+        found_key = match[0]
+        return library[found_key]
+        
+    return None
+
 @st.cache_data(ttl=3600)
 def load_data_from_github():
     library = {}
@@ -152,18 +179,15 @@ def load_data_from_github():
         except: pass
     return library
 
-# --- DATENBANK FUNKTIONEN (MIT QUELLE) ---
+# --- DATENBANK FUNKTIONEN ---
 
 def get_db_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
-        # Wir lesen jetzt 9 Spalten (inkl. source)
         df = conn.read(spreadsheet=SHEET_URL, usecols=list(range(9)), ttl=0)
-        # Standard-Spalten definieren
         cols = ["id", "title", "poster_path", "release_date", "vote_average", "overview", "status", "added_date", "source"]
         if df.empty: return pd.DataFrame(columns=cols)
         df['id'] = df['id'].astype(str)
-        # Fehlende Spalten auffüllen (für Kompatibilität mit alter Tabelle)
         for c in cols:
             if c not in df.columns: df[c] = ""
         return df
@@ -196,7 +220,7 @@ def update_db_status(movie, new_status, origin="Unbekannt"):
                 "overview": clean_html(movie.get('overview', '')),
                 "status": new_status,
                 "added_date": today_str,
-                "source": origin # NEU: QUELLE SPEICHERN
+                "source": origin
             }])
             df = pd.concat([df, new_row], ignore_index=True)
             st.toast(f"Neu: '{title}' ({origin})")
@@ -229,7 +253,6 @@ else: st.sidebar.warning("Keine lokalen Daten.")
 
 menu = st.sidebar.radio("Speisekarte", ["Suche & Inspiration", "TV- und Mediatheken", "Lokale Liste", f"Watchlist ({len(watchlist_items)})", f"Schon gesehen ({len(seen_items)})"])
 
-# ADMIN LINK
 st.sidebar.markdown("---")
 st.sidebar.link_button("📊 Datenbank öffnen", SHEET_URL)
 
@@ -296,24 +319,30 @@ if menu == "Suche & Inspiration":
         st.session_state['search_results'] = results
 
     if st.session_state['search_results']:
+        st.write(f"Treffer: {len(st.session_state['search_results'])}")
+        
         for m in st.session_state['search_results']:
             title = m.get('title') or m.get('name')
+            original_title = m.get('original_title') or m.get('original_name')
             year = str(m.get('release_date', m.get('first_air_date', '')))[0:4]
             rating = round(m.get('vote_average', 0), 1)
             g_text = get_genres_string(m.get('genre_ids', []))
             if g_text: g_text = f" • {g_text}"
             
-            found_local = local_lib.get(title.lower())
-            if not found_local:
-                 for k,v in local_lib.items():
-                    if len(k)>4 and title.lower() in k: found_local=v; break
+            # --- INTELLIGENTE SUCHE ---
+            found_local = find_local_fuzzy(title, local_lib)
+            if not found_local and original_title:
+                found_local = find_local_fuzzy(original_title, local_lib)
             
             # QUELLE BESTIMMEN
             source_label = "💾 Lokal" if found_local else "🔍 Suche"
+            color_prefix = "🟢 " if found_local else ""
 
-            with st.expander(f"{title} ({year}) ⭐ {rating} {g_text}"):
+            with st.expander(f"{color_prefix}{title} ({year}) ⭐ {rating} {g_text}"):
                 if found_local:
                     st.success(f"✅ **IN DEINER SAMMLUNG!** Ort: {found_local['path']} ({found_local['type']})")
+                    if found_local['title'].lower() != title.lower():
+                        st.caption(f"Gefunden als: '{found_local['title']}'")
                 
                 c1, c2 = st.columns([1, 3])
                 if m.get('poster_path'): c1.image(f"{IMAGE_BASE_URL}{m.get('poster_path')}")
@@ -322,16 +351,31 @@ if menu == "Suche & Inspiration":
                     st.markdown("---")
                     
                     m_id = str(m['id'])
+                    media_type = "movie" if m.get('title') else "tv"
+                    
                     in_wl = any(str(x['id']) == m_id for x in watchlist_items)
                     in_seen = any(str(x['id']) == m_id for x in seen_items)
                     
-                    b1, b2 = st.columns(2)
+                    b1, b2, b3 = st.columns([1, 1, 1.5])
                     if b1.button("🎫 Merken", key=f"s_wl_{m_id}", disabled=in_wl):
-                        update_db_status(m, 'watchlist', origin=source_label) # QUELLE ÜBERGEBEN
+                        update_db_status(m, 'watchlist', origin=source_label)
                         st.rerun()
                     if b2.button("✅ Gesehen", key=f"s_sn_{m_id}", disabled=in_seen):
                         update_db_status(m, 'seen', origin=source_label)
                         st.rerun()
+                    
+                    # --- ÄHNLICHE TITEL BUTTON ---
+                    if b3.button("🔗 Ähnliche anzeigen", key=f"sim_{m_id}"):
+                        with st.spinner("Suche ähnliche Titel..."):
+                            url = f"{TMDB_BASE_URL}/{media_type}/{m_id}/recommendations?api_key={TMDB_API_KEY}&language=de-DE"
+                            recs = fetch_tmdb(url)
+                            if recs.get('results'):
+                                st.session_state['search_results'] = recs.get('results')[:10]
+                                st.toast(f"Empfehlungen für '{title}' geladen!")
+                                st.rerun()
+                            else:
+                                st.warning("Keine ähnlichen Titel gefunden.")
+
                     if not found_local:
                          st.link_button("🌐 Wer streamt es?", f"https://www.google.com/search?q={title}+stream+deutsch")
 
@@ -484,7 +528,6 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
         date_added = m.get('added_date', '')
         source = m.get('source', '')
         
-        # INFO STRING ZUSAMMENBAUEN
         meta_info = ""
         if date_added: meta_info += f" | 📅 {date_added}"
         if source: meta_info += f" | Quelle: {source}"

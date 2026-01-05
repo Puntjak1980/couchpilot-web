@@ -4,3 +4,4 @@ openpyxl
 requests
 Pillow
 st-gsheets-connection
+rapidfuzz

@@ -7,18 +7,25 @@ import html
 import io
 import re
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime
+from datetime import datetime, timedelta
 from rapidfuzz import process, fuzz
 
 # --- 1. KONFIGURATION ---
 st.set_page_config(page_title="CouchPilot", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
 
-# --- 2. TÜRSTEHER (LOGIN SCHUTZ) ---
+# --- 2. TÜRSTEHER (MIT MAGIC LINK) ---
 def check_password():
+    """Prüft Passwort via URL-Parameter (?pw=...) ODER Eingabe."""
     if "APP_PASSWORD" not in st.secrets:
         st.warning("⚠️ ACHTUNG: 'APP_PASSWORD' fehlt in den Secrets!")
         return True
 
+    # 1. Automatische Prüfung via Link
+    # Benutzung: https://deine-app.streamlit.app/?pw=DEIN_PASSWORT
+    if st.query_params.get("pw") == st.secrets["APP_PASSWORD"]:
+        return True
+
+    # 2. Manuelle Eingabe
     def password_entered():
         if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
@@ -43,6 +50,7 @@ if not check_password():
 
 if 'tv_infos' not in st.session_state: st.session_state['tv_infos'] = {}
 if 'search_results' not in st.session_state: st.session_state['search_results'] = []
+if 'discovery_results' not in st.session_state: st.session_state['discovery_results'] = []
 if 'local_match_data' not in st.session_state: st.session_state['local_match_data'] = None
 
 GENRE_MAP = {
@@ -55,6 +63,8 @@ GENRE_MAP = {
     10764: "Reality", 10765: "Sci-Fi & Fantasy", 10766: "Soap",
     10767: "Talk", 10768: "War & Politics"
 }
+
+GENRE_MAP_REVERSE = {v: k for k, v in GENRE_MAP.items()}
 
 try:
     TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
@@ -92,6 +102,7 @@ def fetch_tmdb(url):
     return {}
 
 def is_fresh(date_str):
+    """Markiert Titel als NEU, wenn sie aus diesem/letztem/nächsten Jahr sind."""
     if not date_str or len(str(date_str)) < 4: return False
     try:
         year = int(str(date_str)[:4])
@@ -99,6 +110,22 @@ def is_fresh(date_str):
         return year >= (current_year - 1)
     except:
         return False
+
+def get_date_range(option):
+    today = datetime.now()
+    if option == "✨ Brandneu (ab 2024)":
+        return "2024-01-01", f"{today.year + 2}-12-31"
+    elif option == "📅 Dieser Monat":
+        start = today.replace(day=1)
+        next_month = start.replace(day=28) + timedelta(days=4)
+        end = next_month - timedelta(days=next_month.day)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    elif option == "🔮 Nächster Monat":
+        start = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+        next_next = start.replace(day=28) + timedelta(days=4)
+        end = next_next - timedelta(days=next_next.day)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    return None, None
 
 def get_tv_details(tmdb_id):
     url = f"{TMDB_BASE_URL}/tv/{tmdb_id}?api_key={TMDB_API_KEY}&language=de-DE"
@@ -118,6 +145,14 @@ def get_tv_details(tmdb_id):
     }
     status_de = status_map.get(status_raw, status_raw)
     return seasons, episodes, status_de
+
+def get_cast(tmdb_id, media_type):
+    """Holt die Top 4 Darsteller."""
+    url = f"{TMDB_BASE_URL}/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}&language=de-DE"
+    data = fetch_tmdb(url)
+    if data and 'cast' in data:
+        return [p['name'] for p in data['cast'][:4]]
+    return []
 
 def get_feed_items(url, tag_prefix):
     items = []
@@ -188,15 +223,12 @@ def load_data_from_github():
 def get_db_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
-        # Lese jetzt 10 Spalten (inklusive my_rating)
         df = conn.read(spreadsheet=SHEET_URL, usecols=list(range(10)), ttl=0)
         cols = ["id", "title", "poster_path", "release_date", "vote_average", "overview", "status", "added_date", "source", "my_rating"]
         if df.empty: return pd.DataFrame(columns=cols)
         df['id'] = df['id'].astype(str)
-        # Fehlende Spalten auffüllen
         for c in cols:
             if c not in df.columns: df[c] = ""
-        # Rating Spalte numerisch machen
         df['my_rating'] = pd.to_numeric(df['my_rating'], errors='coerce').fillna(0).astype(int)
         return df
     except:
@@ -240,10 +272,8 @@ def update_db_status(movie, new_status, origin="Unbekannt"):
         st.error(f"❌ Fehler beim Speichern: {e}")
 
 def save_personal_rating(movie_id, rating):
-    """Speichert NUR die persönliche Bewertung."""
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = get_db_data()
-    
     if str(movie_id) in df['id'].values:
         df.loc[df['id'] == str(movie_id), 'my_rating'] = rating
         try:
@@ -273,107 +303,121 @@ local_lib = load_data_from_github()
 if local_lib: st.sidebar.success(f"{len(local_lib)} Titel (GitHub).")
 else: st.sidebar.warning("Keine lokalen Daten.")
 
-menu = st.sidebar.radio("Speisekarte", ["Suche & Inspiration", "TV- und Mediatheken", "Lokale Liste", f"Watchlist ({len(watchlist_items)})", f"Schon gesehen ({len(seen_items)})"])
+menu = st.sidebar.radio("Speisekarte", ["Suche & Inspiration", "🔮 Entdecker-Suche", "TV- und Mediatheken", "Lokale Liste", f"Watchlist ({len(watchlist_items)})", f"Schon gesehen ({len(seen_items)})"])
 
 st.sidebar.markdown("---")
 st.sidebar.link_button("📊 Datenbank öffnen", SHEET_URL)
 
-# --- TAB 1: SUCHE & INSPIRATION ---
+# --- TAB: SUCHE & INSPIRATION (WIEDER MIT BUTTONS!) ---
 if menu == "Suche & Inspiration":
     st.header("Was schauen wir heute?")
     
+    # 1. SUCHEINGABE
     c_search, c_btn = st.columns([5, 1])
-    search_query = c_search.text_input("Titel oder Schauspieler...", placeholder="z.B. Navy CIS, The Rookie...", label_visibility="collapsed")
-    
+    search_query = c_search.text_input("Titel oder Schauspieler...", placeholder="z.B. Navy CIS, The Rookie...", label_visibility="collapsed", key="search_input")
+    trigger_text_search = c_btn.button("🔍", use_container_width=True)
+
+    # 2. INSPIRATION BUTTONS (Restored!)
     st.write("Oder Inspiration:")
     cols = st.columns(5)
     genres = [("😂 Komödie", 35), ("😱 Thriller", 53), ("❤️ Romantik", 10749), ("🌍 Doku", 99), ("🏛️ Klassiker", "classic")]
     
     selected_gid = None
-    trigger_search = False
-
-    if c_btn.button("🔍", use_container_width=True): trigger_search = True
+    trigger_btn_search = False
 
     for idx, (name, gid) in enumerate(genres):
         if cols[idx].button(name, use_container_width=True): 
             selected_gid = gid
-            trigger_search = True
+            trigger_btn_search = True
     
-    if trigger_search:
+    c_rnd1, c_rnd2 = st.columns(2)
+    if c_rnd1.button("🎲 Film Zufall", use_container_width=True): 
+        selected_gid = "rnd_movie"
+        trigger_btn_search = True
+    if c_rnd2.button("🎲 Serien Zufall", use_container_width=True): 
+        selected_gid = "rnd_tv"
+        trigger_btn_search = True
+
+    # 3. SUCHE AUSFÜHREN (Entweder Text oder Button)
+    if (trigger_text_search and search_query) or (search_query and not trigger_btn_search):
+        # A) Textsuche
         st.session_state['local_match_data'] = None
-        if search_query:
-            found = find_local_fuzzy(search_query, local_lib)
-            if found:
-                st.session_state['local_match_data'] = found
+        found = find_local_fuzzy(search_query, local_lib)
+        if found:
+            st.session_state['local_match_data'] = found
         
         final_results = []
         seen_ids = set()
 
-        if search_query and not selected_gid:
-            data = fetch_tmdb(f"{TMDB_BASE_URL}/search/multi?api_key={TMDB_API_KEY}&query={search_query}&language=de-DE")
+        data = fetch_tmdb(f"{TMDB_BASE_URL}/search/multi?api_key={TMDB_API_KEY}&query={search_query}&language=de-DE")
+        
+        if data.get('results'):
+            top_hits = data['results'][:5]
+            for hit in top_hits:
+                if str(hit['id']) not in seen_ids:
+                    final_results.append(hit)
+                    seen_ids.add(str(hit['id']))
             
-            if data.get('results'):
-                top_hits = data['results'][:5]
-                for hit in top_hits:
-                    if str(hit['id']) not in seen_ids:
-                        final_results.append(hit)
-                        seen_ids.add(str(hit['id']))
-                
-                best_match = data['results'][0]
-                if best_match.get('media_type') != 'person':
-                    m_id = best_match['id']
-                    m_type = "tv" if best_match.get('name') else "movie"
-                    rec_url = f"{TMDB_BASE_URL}/{m_type}/{m_id}/recommendations?api_key={TMDB_API_KEY}&language=de-DE"
-                    rec_data = fetch_tmdb(rec_url)
-                    if rec_data.get('results'):
-                        for rec in rec_data.get('results')[:20]:
-                            if str(rec['id']) not in seen_ids:
-                                final_results.append(rec)
-                                seen_ids.add(str(rec['id']))
-            
-            st.session_state['search_results'] = final_results
+            best_match = data['results'][0]
+            if best_match.get('media_type') != 'person':
+                m_id = best_match['id']
+                m_type = "tv" if best_match.get('name') else "movie"
+                rec_url = f"{TMDB_BASE_URL}/{m_type}/{m_id}/recommendations?api_key={TMDB_API_KEY}&language=de-DE"
+                rec_data = fetch_tmdb(rec_url)
+                if rec_data.get('results'):
+                    for rec in rec_data.get('results')[:20]:
+                        if str(rec['id']) not in seen_ids:
+                            final_results.append(rec)
+                            seen_ids.add(str(rec['id']))
+        
+        st.session_state['search_results'] = final_results
 
-        elif selected_gid:
-            page = random.randint(1, 10)
-            if selected_gid == "classic":
-                res = fetch_tmdb(f"{TMDB_BASE_URL}/discover/movie?api_key={TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=1000&primary_release_date.lte=2000-01-01&page={page}&language=de-DE")
-            else:
-                base = "movie" if selected_gid != "rnd_tv" else "tv"
-                if selected_gid in ["rnd_movie", "rnd_tv"]:
-                    res = fetch_tmdb(f"{TMDB_BASE_URL}/{base}/popular?api_key={TMDB_API_KEY}&language=de-DE&page={page}")
-                else:
-                    res = fetch_tmdb(f"{TMDB_BASE_URL}/discover/movie?api_key={TMDB_API_KEY}&with_genres={selected_gid}&sort_by=vote_average.desc&vote_count.gte=200&page={random.randint(1,5)}&language=de-DE")
-            
-            if res.get('results'):
-                items = res.get('results')
-                random.shuffle(items)
-                st.session_state['search_results'] = items
+    elif trigger_btn_search and selected_gid:
+        # B) Button/Zufalls-Suche
+        st.session_state['local_match_data'] = None
+        page = random.randint(1, 10)
+        
+        if selected_gid == "classic":
+            res = fetch_tmdb(f"{TMDB_BASE_URL}/discover/movie?api_key={TMDB_API_KEY}&sort_by=vote_average.desc&vote_count.gte=1000&primary_release_date.lte=2000-01-01&page={page}&language=de-DE")
+        elif selected_gid == "rnd_movie":
+            res = fetch_tmdb(f"{TMDB_BASE_URL}/movie/popular?api_key={TMDB_API_KEY}&language=de-DE&page={page}")
+        elif selected_gid == "rnd_tv":
+            res = fetch_tmdb(f"{TMDB_BASE_URL}/tv/popular?api_key={TMDB_API_KEY}&language=de-DE&page={page}")
+        else:
+            res = fetch_tmdb(f"{TMDB_BASE_URL}/discover/movie?api_key={TMDB_API_KEY}&with_genres={selected_gid}&sort_by=vote_average.desc&vote_count.gte=200&page={random.randint(1,5)}&language=de-DE")
+        
+        if res.get('results'):
+            items = res.get('results')
+            random.shuffle(items)
+            st.session_state['search_results'] = items
 
-    # 1. LOKALE TREFFER
+    # 4. ANZEIGE (Lokal & Online)
     if st.session_state.get('local_match_data'):
         lm = st.session_state['local_match_data']
         st.markdown("### 📂 In deiner lokalen Sammlung gefunden:")
         st.success(f"**{lm['title']}** liegt auf: `{lm['path']}` ({lm['type']})")
         with st.expander("Details anzeigen"):
             st.write(f"**Inhalt:** {lm.get('plot', 'n/a')}")
-            st.caption(f"Genre: {lm.get('genre')} | Darsteller: {lm.get('actors')}")
+            if lm.get('actors'):
+                st.write("🎭 **Darsteller (Klick für Suche):**")
+                loc_actors = [x.strip() for x in str(lm.get('actors')).split(',')]
+                cols_act = st.columns(min(len(loc_actors), 5))
+                for i, act in enumerate(loc_actors[:5]):
+                    if cols_act[i].button(act, key=f"loc_act_{i}"):
+                        st.session_state.search_input = act
+                        st.rerun()
         st.markdown("---")
 
-    # 2. ERGEBNISSE
     if st.session_state['search_results']:
-        st.header("Das könnte dir gefallen:")
-        st.caption("Suchergebnisse & Empfehlungen")
-        
+        st.header("Ergebnisse:")
         for idx, m in enumerate(st.session_state['search_results']):
             title = m.get('title') or m.get('name')
             r_date = m.get('release_date') or m.get('first_air_date')
             year = str(r_date)[:4] if r_date else ""
             new_badge = " ✨ NEU" if is_fresh(r_date) else ""
-            
             rating = round(m.get('vote_average', 0), 1)
             overview = m.get('overview', 'Keine Inhaltsangabe verfügbar.')
             g_text = get_genres_string(m.get('genre_ids', []))
-            
             media_type = m.get('media_type')
             if not media_type: media_type = "tv" if m.get('name') else "movie"
             m_id = str(m['id'])
@@ -383,7 +427,6 @@ if menu == "Suche & Inspiration":
                 s_num, e_num, s_status = get_tv_details(m_id)
                 if s_num:
                     extra_info = f" | 📺 {s_num} Staffeln ({e_num} Eps.) | {s_status}"
-            
             meta_line = f"{g_text}{extra_info}" if g_text else extra_info
 
             is_also_local = find_local_fuzzy(title, local_lib) is not None
@@ -393,32 +436,119 @@ if menu == "Suche & Inspiration":
                 c1, c2 = st.columns([1, 3])
                 if m.get('poster_path'): c1.image(f"{IMAGE_BASE_URL}{m.get('poster_path')}")
                 else: c1.text("Kein Bild")
-
                 with c2:
                     st.write(overview)
+                    # Cast Buttons
+                    cast_list = get_cast(m_id, media_type)
+                    if cast_list:
+                        st.write("🎭 **Darsteller (Klick für Suche):**")
+                        c_act = st.columns(len(cast_list))
+                        for i, actor in enumerate(cast_list):
+                            if c_act[i].button(actor, key=f"tmdb_act_{m_id}_{i}"):
+                                st.session_state.search_input = actor
+                                st.rerun()
+
                     st.markdown("---")
-                    
                     in_wl = any(str(x['id']) == m_id for x in watchlist_items)
                     in_seen = any(str(x['id']) == m_id for x in seen_items)
-                    
                     b1, b2, b3 = st.columns([1, 1, 1.5])
-                    
                     if b1.button("🎫 Merken", key=f"s_wl_{m_id}_{idx}", disabled=in_wl):
-                        update_db_status(m, 'watchlist', origin="Suche/Empfehlung")
+                        update_db_status(m, 'watchlist', origin="Suche")
                         st.rerun()
                     if b2.button("✅ Gesehen", key=f"s_sn_{m_id}_{idx}", disabled=in_seen):
-                        update_db_status(m, 'seen', origin="Suche/Empfehlung")
+                        update_db_status(m, 'seen', origin="Suche")
                         st.rerun()
-                    if b3.button("🔗 Ähnliche laden", key=f"sim_{m_id}_{idx}"):
-                        with st.spinner(f"Suche Alternativen zu {title}..."):
-                            rec_url = f"{TMDB_BASE_URL}/{media_type}/{m_id}/recommendations?api_key={TMDB_API_KEY}&language=de-DE"
-                            rec_data = fetch_tmdb(rec_url)
-                            if rec_data.get('results'):
-                                st.session_state['search_results'] = rec_data.get('results')[:15]
-                                st.rerun()
+                    if b3.button("🎬 Trailer", key=f"trl_{m_id}_{idx}"):
+                        st.link_button("▶ YouTube", f"https://www.youtube.com/results?search_query=Trailer+{title}")
 
                     if not is_also_local:
                          st.link_button("🌐 Wer streamt es?", f"https://www.google.com/search?q={title}+stream+deutsch")
+
+# --- TAB: ENTDECKER SUCHE ---
+elif menu == "🔮 Entdecker-Suche":
+    st.header("🔮 Entdecker-Modus")
+    st.caption("Finde genau das, worauf du Lust hast - ohne Titel zu tippen.")
+    
+    col_type, col_genre = st.columns(2)
+    search_type = col_type.radio("Ich suche...", ["Serie 📺", "Film 🎬"], horizontal=True)
+    selected_genre_name = col_genre.selectbox("Genre wählen:", ["Beliebig"] + list(GENRE_MAP.values()))
+    
+    col_time, col_vote = st.columns(2)
+    time_option = col_time.radio("Zeitraum:", ["Alles", "✨ Brandneu (ab 2024)", "📅 Dieser Monat", "🔮 Nächster Monat"])
+    min_vote = col_vote.slider("Mindest-Bewertung:", 0, 9, 6)
+
+    if st.button("🚀 Entdecker starten", use_container_width=True):
+        api_type = "tv" if "Serie" in search_type else "movie"
+        url = f"{TMDB_BASE_URL}/discover/{api_type}?api_key={TMDB_API_KEY}&language=de-DE&sort_by=popularity.desc"
+        
+        if selected_genre_name != "Beliebig":
+            g_id = GENRE_MAP_REVERSE.get(selected_genre_name)
+            if g_id: url += f"&with_genres={g_id}"
+        
+        if min_vote > 0:
+            url += f"&vote_average.gte={min_vote}"
+            url += "&vote_count.gte=100"
+            
+        start, end = get_date_range(time_option)
+        if start and end:
+            url += f"&first_air_date.gte={start}&first_air_date.lte={end}" if api_type == "tv" else f"&primary_release_date.gte={start}&primary_release_date.lte={end}"
+        
+        data = fetch_tmdb(url)
+        st.session_state['discovery_results'] = data.get('results', [])
+    
+    if st.session_state['discovery_results']:
+        st.divider()
+        st.subheader(f"Gefunden: {len(st.session_state['discovery_results'])} Treffer")
+        
+        for idx, m in enumerate(st.session_state['discovery_results']):
+            title = m.get('title') or m.get('name')
+            r_date = m.get('release_date') or m.get('first_air_date')
+            year = str(r_date)[:4] if r_date else ""
+            new_badge = " ✨ NEU" if is_fresh(r_date) else ""
+            rating = round(m.get('vote_average', 0), 1)
+            overview = m.get('overview', 'Keine Inhaltsangabe verfügbar.')
+            g_text = get_genres_string(m.get('genre_ids', []))
+            media_type = "tv" if "Serie" in search_type else "movie"
+            m_id = str(m['id'])
+            
+            extra_info = ""
+            if media_type == 'tv':
+                s_num, e_num, s_status = get_tv_details(m_id)
+                if s_num:
+                    extra_info = f" | 📺 {s_num} Staffeln ({e_num} Eps.) | {s_status}"
+            meta_line = f"{g_text}{extra_info}" if g_text else extra_info
+
+            is_also_local = find_local_fuzzy(title, local_lib) is not None
+            color_prefix = "🟢 " if is_also_local else ""
+
+            with st.expander(f"{color_prefix}{title} ({year}){new_badge} ⭐ {rating} • {meta_line}"):
+                c1, c2 = st.columns([1, 3])
+                if m.get('poster_path'): c1.image(f"{IMAGE_BASE_URL}{m.get('poster_path')}")
+                else: c1.text("Kein Bild")
+                with c2:
+                    st.write(overview)
+                    # Cast
+                    cast_list = get_cast(m_id, media_type)
+                    if cast_list:
+                        st.write("🎭 **Darsteller:**")
+                        c_act = st.columns(len(cast_list))
+                        for i, actor in enumerate(cast_list):
+                            if c_act[i].button(actor, key=f"dsc_act_{m_id}_{i}"):
+                                st.session_state.search_input = actor
+                                st.rerun()
+
+                    st.markdown("---")
+                    in_wl = any(str(x['id']) == m_id for x in watchlist_items)
+                    in_seen = any(str(x['id']) == m_id for x in seen_items)
+                    b1, b2, b3 = st.columns([1, 1, 1.5])
+                    if b1.button("🎫 Merken", key=f"dsc_wl_{m_id}_{idx}", disabled=in_wl):
+                        update_db_status(m, 'watchlist', origin="Entdecker")
+                        st.rerun()
+                    if b2.button("✅ Gesehen", key=f"dsc_sn_{m_id}_{idx}", disabled=in_seen):
+                        update_db_status(m, 'seen', origin="Entdecker")
+                        st.rerun()
+                    if b3.button("🎬 Trailer", key=f"dsc_trl_{m_id}_{idx}"):
+                        st.link_button("▶ YouTube", f"https://www.youtube.com/results?search_query=Trailer+{title}")
 
 # --- TAB 2: TV & MEDIATHEKEN ---
 elif menu == "TV- und Mediatheken":
@@ -553,7 +683,6 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
         elif "📅" in sort_option:
             target_list.sort(key=lambda x: str(x.get('release_date', '')), reverse=True)
         elif "👤" in sort_option:
-            # Sortierung nach eigener Bewertung
             target_list.sort(key=lambda x: int(x.get('my_rating', 0) or 0), reverse=True)
         else: 
             target_list.reverse()
@@ -569,8 +698,6 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
         rating = m.get('vote_average')
         date_added = m.get('added_date', '')
         source = m.get('source', '')
-        
-        # --- EIGENE BEWERTUNG ---
         my_rate = m.get('my_rating', 0)
         user_rating_display = f" | 👤 {my_rate}/10" if my_rate > 0 else ""
 
@@ -583,22 +710,18 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
             if m.get('poster_path'): c1.image(f"{IMAGE_BASE_URL}{m.get('poster_path')}")
             with c2:
                 st.write(m.get('overview'))
-                
-                # --- BEWERTUNGSSLIDER NUR BEI GESEHEN ---
                 if is_seen:
                     st.markdown("---")
                     st.caption("Deine Bewertung:")
                     c_rate, c_save = st.columns([3, 1])
-                    # Slider Value auf aktuellen Wert setzen (oder 5 als Standard)
                     current_val = int(my_rate) if my_rate > 0 else 5
                     new_val = c_rate.slider("Sterne", 1, 10, current_val, key=f"sl_{m['id']}_{idx}", label_visibility="collapsed")
-                    
                     if c_save.button("💾 Speichern", key=f"sv_{m['id']}_{idx}"):
                         save_personal_rating(m['id'], new_val)
                         st.rerun()
 
                 st.markdown("---")
-                b1, b2 = st.columns(2)
+                b1, b2, b3 = st.columns([1, 1, 1.5])
                 list_prefix = "seen" if is_seen else "wl"
                 m_id = str(m['id'])
                 
@@ -614,3 +737,5 @@ elif "Watchlist" in menu or "Schon gesehen" in menu:
                     if b2.button("✅ Gesehen", key=f"mov_to_seen_{m_id}_{idx}"):
                         update_db_status(m, 'seen')
                         st.rerun()
+                    if b3.button("🎬 Trailer", key=f"trl_wl_{m_id}_{idx}"):
+                        st.link_button("▶ YouTube", f"https://www.youtube.com/results?search_query=Trailer+{title}")
